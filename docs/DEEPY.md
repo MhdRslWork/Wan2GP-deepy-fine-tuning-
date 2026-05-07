@@ -4,6 +4,7 @@ Deepy is WanGP's assistant for multi-step media work. It can generate, inspect, 
 
 This guide covers:
 
+- the advanced architecture roadmap
 - general guidelines
 - enabling Deepy
 - configuring Deepy in the web UI
@@ -14,6 +15,13 @@ This guide covers:
 - using Deepy from the CLI
 
 **Please note Deepy make errors, so be sure to verify Deep's work**
+
+
+## Advanced Architecture Roadmap
+
+The long-term Deepy roadmap is tracked in [Deepy Advanced Fine-Tuning Architecture](DEEPY_ADVANCED_ARCHITECTURE.md). The core direction is to make Deepy more adaptive and parameter-aware while preserving the safety rule that unsupported settings must not be silently ignored.
+
+Deepy now exposes `Get Backend Capabilities` as an initial routing guard for model-specific requests. Use it with `Get Default Settings`: backend capabilities explain broad Wan/LTX/CogVideo/Hunyuan/Mochi-family support, while default settings remain the exact source of truth for currently exposed override keys.
 
 ## General Guidelines
 Once enabled (see below), Deepy becomes accessible by opening Deepy chat window when you click on the left dock `Ask Deepy`
