@@ -33,6 +33,7 @@ from shared.deepy.config import (
     normalize_deepy_vram_mode,
 )
 from shared.deepy import DEFAULT_SYSTEM_PROMPT as ASSISTANT_SYSTEM_PROMPT
+from shared.deepy.backend_capabilities import describe_backend_capabilities
 from shared.deepy.debug_bootstrap import capture_external_logs
 from shared import extra_settings
 from shared.deepy import media_registry, tool_settings as deepy_tool_settings, transcription as deepy_transcription, ui_settings as deepy_ui_settings, video_tools as deepy_video_tools, vision as deepy_vision
@@ -2280,6 +2281,35 @@ class tools:
             "loras": loras,
             "count": len(loras),
         }
+
+
+    @assistant_tool(
+        display_name="Get Backend Capabilities",
+        description="Return the selected generation tool backend family and conservative capability hints for routing model-specific settings without silently ignoring unsupported parameters.",
+        parameters={
+            "tool_id": {
+                "type": "string",
+                "description": "Generation tool id: gen_image, edit_image, gen_video, gen_video_with_speech, gen_speech_from_description, or gen_speech_from_sample.",
+                "enum": list(deepy_tool_settings.GENERATION_TOOL_IDS),
+            },
+        },
+        pause_runtime=False,
+    )
+    def get_backend_capabilities(self, tool_id: str) -> dict[str, Any]:
+        lookup_name = str(tool_id or "").strip()
+        if lookup_name not in deepy_tool_settings.GENERATION_TOOL_IDS:
+            return {
+                "status": "error",
+                "tool_id": lookup_name,
+                "error": f"tool_id must be one of: {', '.join(deepy_tool_settings.GENERATION_TOOL_IDS)}.",
+            }
+        variant = self.get_tool_variant(lookup_name)
+        model_def = self._get_effective_tool_model_def(lookup_name)
+        capabilities = describe_backend_capabilities(model_def, variant)
+        capabilities["status"] = "ok"
+        capabilities["tool_id"] = lookup_name
+        capabilities["template"] = self.get_tool_template_filename(lookup_name)
+        return capabilities
 
     @assistant_tool(
         display_name="Get Default Settings",
