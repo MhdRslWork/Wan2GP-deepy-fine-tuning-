@@ -21,7 +21,7 @@ This guide covers:
 
 The long-term Deepy roadmap is tracked in [Deepy Advanced Fine-Tuning Architecture](DEEPY_ADVANCED_ARCHITECTURE.md). The core direction is to make Deepy more adaptive and parameter-aware while preserving the safety rule that unsupported settings must not be silently ignored.
 
-Deepy now exposes `Get Backend Capabilities` as an initial routing guard for model-specific requests. Use it with `Get Default Settings`: backend capabilities explain broad Wan/LTX/CogVideo/Hunyuan/Mochi-family support, while default settings remain the exact source of truth for currently exposed override keys.
+Deepy now exposes `Get Backend Capabilities` as an initial routing guard for model-specific requests. Use it with `Get Default Settings`: backend capabilities explain broad Wan/LTX/CogVideo/Hunyuan/Mochi-family support, while default settings remain the exact source of truth for currently exposed `extra_settings` and raw WanGP/headless keys listed under `headless_settings`.
 
 ## General Guidelines
 Once enabled (see below), Deepy becomes accessible by opening Deepy chat window when you click on the left dock `Ask Deepy`
@@ -36,7 +36,7 @@ Deepy can also work with User Imported Media:
 
 Once the media are in the galleries, you can refer to them using wording like `the last audio file`, `the selected video` or describe their content (Deepy will query the prompts stored in the generation metadata if they exist).
 
-Deepy simply can not infer the best generation settings based for your request, since the combinations are too many and depend on the generation model you want to use. So Deepy relies on predefined Templates Settings for its main 6 generation tools (`Generate Image`, `Generate Video`, `Edit Image`, `Generate Video with Speaker`, `Generate Audio from description`, `Generate Audio from Sample`). 
+Deepy simply can not infer the best generation settings based for your request, since the combinations are too many and depend on the generation model you want to use. So Deepy relies on predefined Templates Settings for its main 6 generation tools (`Generate Image`, `Generate Video`, `Edit Image`, `Generate Video with Speaker`, `Generate Audio from description`, `Generate Audio from Sample`).
 
 WanGP comes with builtin templates ready to use but you may as well link presaved settings. You can access Deepy settings by clicking the `Settings` control on the right of the Deepy chat window.
 
@@ -44,7 +44,7 @@ In the web UI, Deepy settings changes take effect for the current Deepy session 
 
 You can also define Default Width & Height to use for all the generation tools in Deepy Settings Window. These will be used only if the checkbox `Use Properties defined in Settings in Templates files` is not checked. This is convenient if you want to override the values defined in the templates without modifying them.
 
-Last but not least you can ask directly Deepy to override the following templates settings: `width`, `height`, `num of frames`, `fps`, `loras` or `num inference steps`. 
+Last but not least you can ask directly Deepy to override common template settings: `width`, `height`, `num of frames`, `fps`, `loras`, or `num inference steps`. For advanced WanGP settings-file/headless controls such as `override_attention`, `override_profile`, `force_fps`, model selection keys, sliding-window keys, or backend-specific sampler/guidance controls, Deepy first checks `Get Default Settings`. If the key appears in `headless_settings.available_keys` (or through a listed alias such as `wan2gp_profile` -> `override_profile`), Deepy can pass the requested value through `advanced_settings` instead of silently ignoring it.
 
 ## Enabling Deepy
 
@@ -82,19 +82,19 @@ All changes in this panel are used immediately by the current Deepy web session.
 
 ### Generation Properties
 
-- `Auto-abort or remove Deepy-started generation on Stop/Reset.`  
+- `Auto-abort or remove Deepy-started generation on Stop/Reset.`
   Controls whether Deepy-created queue work is cancelled or removed when you stop/reset Deepy.
 
-- `Use Properties defined in Templates Settings files.`  
+- `Use Properties defined in Templates Settings files.`
   When enabled, Deepy uses the selected tool template as-is. When disabled, Deepy still starts from the template, but replaces only width, height, video frame count, and seed with the panel defaults below.
 
-- `Width` and `Height`  
+- `Width` and `Height`
   Default size overrides used only when template properties are disabled.
 
-- `Number of Frames`  
+- `Number of Frames`
   Default frame-count override for `Generate Video`, used only when template properties are disabled.
 
-- `Seed (-1 for random)`  
+- `Seed (-1 for random)`
   Default seed override, used only when template properties are disabled. `-1` means random.
 
 Inference steps, FPS, LoRAs, and other model-specific values remain template-driven unless you ask for one of the supported per-request overrides described later in this guide.
@@ -163,7 +163,7 @@ When you use the tool later, Deepy reads the linked WanGP settings file directly
 - If the linked file disappears, Deepy falls back to that tool's default template.
 - If the linked file still exists but is no longer eligible for that tool, the tool returns an eligibility error.
 - Built-in templates cannot be deleted from the UI.
-- Linked templates are the right place for model-specific settings that Deepy does not expose directly. Deepy can still override width, height, frame count, FPS, inference steps, and LoRAs on the supported tools.
+- Linked templates are still the safest place for complete model-specific presets. Deepy can override width, height, frame count, FPS, inference steps, LoRAs, exposed `extra_settings`, and validated raw WanGP/headless keys through `advanced_settings` on the supported tools.
 
 ## How Deepy Interprets Media References
 
