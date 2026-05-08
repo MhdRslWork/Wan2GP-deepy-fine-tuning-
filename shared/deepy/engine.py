@@ -102,6 +102,34 @@ _EXTRA_SETTINGS_PARAMETER = {
     "description": "Optional dict of additional exposed UI settings. Call Get Default Settings first and copy one of its extra_settings keys exactly, for example {\"Guidance\": 7.5}.",
     "required": False,
 }
+_ADVANCED_SETTINGS_PARAMETER = {
+    "type": "object",
+    "description": "Optional dict of raw WanGP/headless settings keys to merge into the generated settings, for backend/runtime controls not represented by the primary tool parameters or extra_settings. Call Get Default Settings first and use keys from `headless_settings.available_keys` or `headless_settings.aliases`, for example {\"override_attention\": \"sage2\", \"override_profile\": 4}. Do not use this for prompt text, media ids, or output filenames.",
+    "required": False,
+}
+_ADVANCED_SETTING_ALIASES = {
+    "fps": "force_fps",
+    "override_fps": "force_fps",
+    "wan2gp_profile": "override_profile",
+    "profile": "override_profile",
+    "attention": "override_attention",
+    "attention_mode": "override_attention",
+}
+_ADVANCED_SETTING_DENYLIST = {
+    "client_id",
+    "output_filename",
+    "output_file",
+    "prompt",
+    "negative_prompt",
+}
+_ADVANCED_SETTING_ALWAYS_ALLOWED = {
+    "override_attention",
+    "override_profile",
+    "force_fps",
+    "model_type",
+    "base_model_type",
+    "model_filename",
+}
 
 
 def set_assistant_debug(enabled: bool) -> None:
@@ -1282,7 +1310,7 @@ class tools:
                     "resolution": str(task.get("resolution", "") or "").strip(),
                     "error": parse_error,
                 }
-            range_error = extra_settings.validate_setting_value(label, parsed_value, entry.get("type", "number"), entry.get("min", None), entry.get("max", None))
+            range_error = globals()["extra_settings"].validate_setting_value(label, parsed_value, entry.get("type", "number"), entry.get("min", None), entry.get("max", None))
             if range_error is not None:
                 return None, {
                     "status": "error",
@@ -1296,6 +1324,151 @@ class tools:
                 custom_settings[str(entry["key"])] = parsed_value
             else:
                 task[str(entry["key"])] = parsed_value
+        if len(custom_settings) > 0:
+            task["custom_settings"] = custom_settings
+        return task, None
+
+
+    def _get_generation_model_default_settings(self, task: dict[str, Any]) -> dict[str, Any]:
+        model_type = str(task.get("model_type", "") or task.get("base_model_type", "") or "").strip()
+        if len(model_type) == 0:
+            return {}
+        get_default_settings = _get_main_callable("get_default_settings")
+        if not callable(get_default_settings):
+            return {}
+        try:
+            defaults = get_default_settings(model_type)
+        except Exception:
+            return {}
+        return copy.deepcopy(defaults) if isinstance(defaults, dict) else {}
+
+    def _get_generation_headless_settings_info(self, task: dict[str, Any]) -> dict[str, Any]:
+        merged_defaults = self._get_generation_model_default_settings(task)
+        if isinstance(task, dict):
+            merged_defaults.update(copy.deepcopy(task))
+        model_def = None
+        model_type = str(merged_defaults.get("model_type", "") or merged_defaults.get("base_model_type", "") or "").strip()
+        get_model_def = _get_main_callable("get_model_def")
+        if callable(get_model_def) and len(model_type) > 0:
+            try:
+                raw_model_def = get_model_def(model_type)
+                model_def = raw_model_def if isinstance(raw_model_def, dict) else None
+            except Exception:
+                model_def = None
+        try:
+            extra_defs = extra_settings.iter_defs(model_def, only_visible=False, guidance_phases=merged_defaults.get("guidance_phases", 1), model_type=model_type)
+        except Exception:
+            extra_defs = {}
+        allowed_keys = {str(key).strip() for key in merged_defaults.keys() if len(str(key).strip()) > 0}
+        allowed_keys.update(str(key).strip() for key in getattr(extra_defs, "keys", lambda: [])() if len(str(key).strip()) > 0)
+        allowed_keys.update(_ADVANCED_SETTING_ALWAYS_ALLOWED)
+        denied_keys = sorted(key for key in _ADVANCED_SETTING_DENYLIST if key in allowed_keys)
+        available_keys = sorted(key for key in allowed_keys if key not in _ADVANCED_SETTING_DENYLIST)
+        values = {key: copy.deepcopy(merged_defaults.get(key, None)) for key in available_keys if key in merged_defaults}
+        schema: dict[str, dict[str, Any]] = {}
+        for key in available_keys:
+            setting_def = extra_defs.get(key, None) if isinstance(extra_defs, dict) else None
+            if setting_def is not None:
+                schema[key] = {
+                    "label": str(getattr(setting_def, "label", key) or key),
+                    "type": str(getattr(setting_def, "type", "number") or "number"),
+                    "min": getattr(setting_def, "min", None),
+                    "max": getattr(setting_def, "max", None),
+                    "custom": bool(getattr(setting_def, "custom", False)),
+                    "visible": bool(getattr(setting_def, "visible", False)),
+                }
+        return {
+            "available_keys": available_keys,
+            "aliases": dict(_ADVANCED_SETTING_ALIASES),
+            "blocked_keys": denied_keys,
+            "values": values,
+            "schema": schema,
+        }
+
+    @staticmethod
+    def _normalize_advanced_setting_key(raw_key: Any) -> str:
+        key = str(raw_key or "").strip()
+        return _ADVANCED_SETTING_ALIASES.get(key, key)
+
+    @staticmethod
+    def _normalize_advanced_setting_value(key: str, value: Any) -> Any:
+        if key == "force_fps":
+            if value is None:
+                return ""
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                number = float(value)
+                return str(int(number)) if number.is_integer() else str(number)
+            return str(value).strip()
+        if key == "override_profile":
+            if value is None or str(value).strip() == "":
+                return -1
+            if isinstance(value, bool):
+                raise ValueError("advanced_settings['override_profile'] must be a number such as 1, 2, 3, 4, 4.5, or 5.")
+            number = float(value)
+            return int(number) if number.is_integer() else number
+        if key == "override_attention":
+            text = str(value or "").strip()
+            allowed = {"", "auto", "sdpa", "sage", "sage2", "flash", "xformers"}
+            if text not in allowed:
+                raise ValueError("advanced_settings['override_attention'] must be one of: auto, sdpa, sage, sage2, flash, xformers, or empty string for default.")
+            return text
+        return value
+
+    def _apply_advanced_settings_overrides(self, tool_name: str, task: dict[str, Any], advanced_settings: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if advanced_settings is None:
+            return task, None
+        if not isinstance(advanced_settings, dict):
+            return None, {
+                "status": "error",
+                "client_id": str(task.get("client_id", "") or "").strip(),
+                "output_file": "",
+                "prompt": str(task.get("prompt", "") or "").strip(),
+                "resolution": str(task.get("resolution", "") or "").strip(),
+                "error": "advanced_settings must be an object.",
+            }
+        if len(advanced_settings) == 0:
+            return task, None
+        headless_info = self._get_generation_headless_settings_info(task)
+        allowed_keys = set(headless_info.get("available_keys", []) or [])
+        custom_settings = task.get("custom_settings", None)
+        if not isinstance(custom_settings, dict):
+            custom_settings = {}
+        try:
+            model_def = None
+            model_type = str(task.get("model_type", "") or task.get("base_model_type", "") or "").strip()
+            get_model_def = _get_main_callable("get_model_def")
+            if callable(get_model_def) and len(model_type) > 0:
+                raw_model_def = get_model_def(model_type)
+                model_def = raw_model_def if isinstance(raw_model_def, dict) else None
+            setting_defs = extra_settings.iter_defs(model_def, only_visible=False, guidance_phases=task.get("guidance_phases", 1), model_type=model_type)
+        except Exception:
+            setting_defs = {}
+        for raw_key, raw_value in advanced_settings.items():
+            key = self._normalize_advanced_setting_key(raw_key)
+            if len(key) == 0:
+                return None, {"status": "error", "client_id": str(task.get("client_id", "") or "").strip(), "output_file": "", "prompt": str(task.get("prompt", "") or "").strip(), "resolution": str(task.get("resolution", "") or "").strip(), "error": "advanced_settings keys must be non-empty strings."}
+            if key in _ADVANCED_SETTING_DENYLIST:
+                return None, {"status": "error", "client_id": str(task.get("client_id", "") or "").strip(), "output_file": "", "prompt": str(task.get("prompt", "") or "").strip(), "resolution": str(task.get("resolution", "") or "").strip(), "error": f"advanced_settings['{raw_key}'] is managed by Deepy and cannot be overridden here."}
+            if key not in allowed_keys:
+                preview = ", ".join(sorted(allowed_keys)[:80])
+                return None, {"status": "error", "client_id": str(task.get("client_id", "") or "").strip(), "output_file": "", "prompt": str(task.get("prompt", "") or "").strip(), "resolution": str(task.get("resolution", "") or "").strip(), "error": f"Unknown advanced setting '{raw_key}' for tool '{tool_name}'. Call Get Default Settings first and use headless_settings.available_keys or aliases. Available keys include: {preview}."}
+            try:
+                value = self._normalize_advanced_setting_value(key, raw_value)
+            except Exception as exc:
+                return None, {"status": "error", "client_id": str(task.get("client_id", "") or "").strip(), "output_file": "", "prompt": str(task.get("prompt", "") or "").strip(), "resolution": str(task.get("resolution", "") or "").strip(), "error": str(exc)}
+            setting_def = setting_defs.get(key, None) if isinstance(setting_defs, dict) else None
+            if setting_def is not None:
+                parsed_value, parse_error = self._parse_extra_setting_override_value(key, value, getattr(setting_def, "type", "number"))
+                if parse_error is not None:
+                    return None, {"status": "error", "client_id": str(task.get("client_id", "") or "").strip(), "output_file": "", "prompt": str(task.get("prompt", "") or "").strip(), "resolution": str(task.get("resolution", "") or "").strip(), "error": parse_error.replace("extra_settings", "advanced_settings")}
+                range_error = extra_settings.validate_setting_value(key, parsed_value, getattr(setting_def, "type", "number"), getattr(setting_def, "min", None), getattr(setting_def, "max", None))
+                if range_error is not None:
+                    return None, {"status": "error", "client_id": str(task.get("client_id", "") or "").strip(), "output_file": "", "prompt": str(task.get("prompt", "") or "").strip(), "resolution": str(task.get("resolution", "") or "").strip(), "error": range_error}
+                value = parsed_value
+                if bool(getattr(setting_def, "custom", False)):
+                    custom_settings[key] = value
+                    continue
+            task[key] = value
         if len(custom_settings) > 0:
             task["custom_settings"] = custom_settings
         return task, None
@@ -1354,6 +1527,7 @@ class tools:
         if lookup_name == "gen_video":
             result["multimedia_generation"] = bool(model_def.get("multimedia_generation", False))
         result["extra_settings"] = {label: entry.get("value", None) for label, entry in self._get_generation_extra_settings_info(task).items()}
+        result["headless_settings"] = self._get_generation_headless_settings_info(task)
         return result, None
 
     def _apply_generation_overrides(
@@ -1369,6 +1543,7 @@ class tools:
         fps: int | None = None,
         num_inference_steps: int | None = None,
         extra_settings: dict[str, Any] | None = None,
+        advanced_settings: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         ui_settings = self._get_tool_ui_settings()
         if ui_settings["use_template_properties"]:
@@ -1441,7 +1616,10 @@ class tools:
             if num_inference_steps <= 0:
                 return None, {"status": "error", "client_id": str(task.get("client_id", "") or "").strip(), "output_file": "", "prompt": str(task.get("prompt", "") or "").strip(), "resolution": task["resolution"], "error": "num_inference_steps must be a positive integer."}
             task["num_inference_steps"] = int(num_inference_steps)
-        return self._apply_extra_settings_overrides(tool_name, task, extra_settings)
+        task, error_result = self._apply_extra_settings_overrides(tool_name, task, extra_settings)
+        if error_result is not None:
+            return None, error_result
+        return self._apply_advanced_settings_overrides(tool_name, task, advanced_settings)
 
     def _build_generation_task(self, tool_name: str, variant: str, *, prompt: str, client_id: str, **kwargs) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         self._remember_generated_client_id(client_id)
@@ -2309,6 +2487,14 @@ class tools:
         capabilities["status"] = "ok"
         capabilities["tool_id"] = lookup_name
         capabilities["template"] = self.get_tool_template_filename(lookup_name)
+        try:
+            defaults, defaults_error = self._get_effective_generation_defaults(lookup_name)
+            if isinstance(defaults, dict) and isinstance(defaults.get("headless_settings"), dict):
+                capabilities["headless_settings"] = copy.deepcopy(defaults["headless_settings"])
+            elif isinstance(defaults_error, dict):
+                capabilities["headless_settings_error"] = str(defaults_error.get("error", "") or "")
+        except Exception as exc:
+            capabilities["headless_settings_error"] = str(exc)
         return capabilities
 
     @assistant_tool(
@@ -2351,9 +2537,10 @@ class tools:
                 "required": False,
             },
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
+            "advanced_settings": copy.deepcopy(_ADVANCED_SETTINGS_PARAMETER),
         },
     )
-    def gen_image(self, prompt: str, width: int | None = None, height: int | None = None, num_inference_steps: int | None = None, extra_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def gen_image(self, prompt: str, width: int | None = None, height: int | None = None, num_inference_steps: int | None = None, extra_settings: dict[str, Any] | None = None, advanced_settings: dict[str, Any] | None = None) -> dict[str, Any]:
         client_id = _next_ai_client_id()
         generator_variant = self._get_tool_ui_settings()["image_generator_variant"]
         template_file = self.get_tool_template_filename("gen_image")
@@ -2363,7 +2550,7 @@ class tools:
             if len(template_file) > 0:
                 error_result["template_file"] = template_file
             return error_result
-        task, error_result = self._apply_generation_overrides("gen_image", task, include_num_frames=False, width=width, height=height, num_inference_steps=num_inference_steps, extra_settings=extra_settings)
+        task, error_result = self._apply_generation_overrides("gen_image", task, include_num_frames=False, width=width, height=height, num_inference_steps=num_inference_steps, extra_settings=extra_settings, advanced_settings=advanced_settings)
         if error_result is not None:
             error_result["generator_variant"] = generator_variant
             if len(template_file) > 0:
@@ -2434,6 +2621,7 @@ class tools:
                 "required": False,
             },
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
+            "advanced_settings": copy.deepcopy(_ADVANCED_SETTINGS_PARAMETER),
             "loras": {
                 "type": "array",
                 "description": "Optional list of LoRA filenames to apply. Each item must include `name` and may include `multiplier` as a number like 0.8 or a WanGP multiplier string like `0;1`. Omitted multipliers default to 1.",
@@ -2461,6 +2649,7 @@ class tools:
         fps: int | None = None,
         num_inference_steps: int | None = None,
         extra_settings: dict[str, Any] | None = None,
+        advanced_settings: dict[str, Any] | None = None,
         loras: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self._sync_recent_media()
@@ -2511,7 +2700,7 @@ class tools:
             if end_media is not None:
                 error_result["source_end_media_id"] = end_media.get("media_id", "")
             return error_result
-        task, error_result = self._apply_generation_overrides("gen_video", task, include_num_frames=True, width=width, height=height, num_frames=num_frames, duration_seconds=duration_seconds, fps=fps, num_inference_steps=num_inference_steps, extra_settings=extra_settings)
+        task, error_result = self._apply_generation_overrides("gen_video", task, include_num_frames=True, width=width, height=height, num_frames=num_frames, duration_seconds=duration_seconds, fps=fps, num_inference_steps=num_inference_steps, extra_settings=extra_settings, advanced_settings=advanced_settings)
         if error_result is not None:
             error_result["generator_variant"] = generator_variant
             if len(template_file) > 0:
@@ -2588,6 +2777,7 @@ class tools:
                 "required": False,
             },
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
+            "advanced_settings": copy.deepcopy(_ADVANCED_SETTINGS_PARAMETER),
             "loras": {
                 "type": "array",
                 "description": "Optional list of LoRA filenames to apply. Each item must include `name` and may include `multiplier` as a number like 0.8 or a WanGP multiplier string like `0;1`. Omitted multipliers default to 1.",
@@ -2615,6 +2805,7 @@ class tools:
         fps: int | None = None,
         num_inference_steps: int | None = None,
         extra_settings: dict[str, Any] | None = None,
+        advanced_settings: dict[str, Any] | None = None,
         loras: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self._sync_recent_media()
@@ -2664,7 +2855,7 @@ class tools:
             error_result["source_audio_media_id"] = audio_media.get("media_id", "")
             error_result["image_start_target"] = self._get_image_start_target("gen_video_with_speech")
             return error_result
-        task, error_result = self._apply_generation_overrides("gen_video_with_speech", task, include_num_frames=True, width=width, height=height, num_frames=num_frames, duration_seconds=duration_seconds, fps=fps, num_inference_steps=num_inference_steps, extra_settings=extra_settings)
+        task, error_result = self._apply_generation_overrides("gen_video_with_speech", task, include_num_frames=True, width=width, height=height, num_frames=num_frames, duration_seconds=duration_seconds, fps=fps, num_inference_steps=num_inference_steps, extra_settings=extra_settings, advanced_settings=advanced_settings)
         if error_result is not None:
             error_result["generator_variant"] = generator_variant
             if len(template_file) > 0:
@@ -2714,9 +2905,10 @@ class tools:
                 "description": "A short description of the desired voice, tone, or speaking style.",
             },
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
+            "advanced_settings": copy.deepcopy(_ADVANCED_SETTINGS_PARAMETER),
         },
     )
-    def gen_speech_from_description(self, prompt: str, voice_description: str, extra_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def gen_speech_from_description(self, prompt: str, voice_description: str, extra_settings: dict[str, Any] | None = None, advanced_settings: dict[str, Any] | None = None) -> dict[str, Any]:
         client_id = _next_ai_client_id()
         generator_variant = self.get_tool_variant("gen_speech_from_description")
         template_file = self.get_tool_template_filename("gen_speech_from_description")
@@ -2727,6 +2919,8 @@ class tools:
                 error_result["template_file"] = template_file
             return error_result
         task, error_result = self._apply_extra_settings_overrides("gen_speech_from_description", task, extra_settings)
+        if error_result is None:
+            task, error_result = self._apply_advanced_settings_overrides("gen_speech_from_description", task, advanced_settings)
         if error_result is not None:
             error_result["generator_variant"] = generator_variant
             if len(template_file) > 0:
@@ -2770,9 +2964,10 @@ class tools:
                 "description": "The media id of the audio sample returned by Resolve Media.",
             },
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
+            "advanced_settings": copy.deepcopy(_ADVANCED_SETTINGS_PARAMETER),
         },
     )
-    def gen_speech_from_sample(self, prompt: str, media_id: str, extra_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def gen_speech_from_sample(self, prompt: str, media_id: str, extra_settings: dict[str, Any] | None = None, advanced_settings: dict[str, Any] | None = None) -> dict[str, Any]:
         self._sync_recent_media()
         sample_media, error_result = self._resolve_audio_media(media_id, "media_id")
         if error_result is not None:
@@ -2795,6 +2990,8 @@ class tools:
             error_result["source_media_id"] = sample_media.get("media_id", "")
             return error_result
         task, error_result = self._apply_extra_settings_overrides("gen_speech_from_sample", task, extra_settings)
+        if error_result is None:
+            task, error_result = self._apply_advanced_settings_overrides("gen_speech_from_sample", task, advanced_settings)
         if error_result is not None:
             error_result["generator_variant"] = generator_variant
             if len(template_file) > 0:
@@ -2854,6 +3051,7 @@ class tools:
                 "required": False,
             },
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
+            "advanced_settings": copy.deepcopy(_ADVANCED_SETTINGS_PARAMETER),
         },
     )
     def edit_image(
@@ -2864,6 +3062,7 @@ class tools:
         height: int | None = None,
         num_inference_steps: int | None = None,
         extra_settings: dict[str, Any] | None = None,
+        advanced_settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._sync_recent_media()
         if self.session is None:
@@ -2896,7 +3095,7 @@ class tools:
                 error_result["template_file"] = template_file
             error_result["media_id"] = media_record.get("media_id", "")
             return error_result
-        task, error_result = self._apply_generation_overrides("edit_image", task, include_num_frames=False, width=width, height=height, num_inference_steps=num_inference_steps, extra_settings=extra_settings)
+        task, error_result = self._apply_generation_overrides("edit_image", task, include_num_frames=False, width=width, height=height, num_inference_steps=num_inference_steps, extra_settings=extra_settings, advanced_settings=advanced_settings)
         if error_result is not None:
             error_result["editor_variant"] = editor_variant
             if len(template_file) > 0:
